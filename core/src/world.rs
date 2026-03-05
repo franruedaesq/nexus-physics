@@ -243,6 +243,13 @@ impl PhysicsWorld {
             .get_mut(handle)
             .ok_or_else(|| format!("Rapier handle for '{}' is invalid", entity_id))?;
 
+        if !body.is_dynamic() {
+            return Err(format!(
+                "Cannot set velocity on non-dynamic body '{}': only Dynamic bodies respond to velocity commands",
+                entity_id
+            ));
+        }
+
         body.set_linvel(vector![linear[0], linear[1], linear[2]], true);
         body.set_angvel(vector![angular[0], angular[1], angular[2]], true);
         Ok(())
@@ -260,6 +267,13 @@ impl PhysicsWorld {
             .rigid_body_set
             .get_mut(handle)
             .ok_or_else(|| format!("Rapier handle for '{}' is invalid", entity_id))?;
+
+        if !body.is_dynamic() {
+            return Err(format!(
+                "Cannot apply impulse to non-dynamic body '{}': only Dynamic bodies respond to impulses",
+                entity_id
+            ));
+        }
 
         body.apply_impulse(vector![impulse[0], impulse[1], impulse[2]], true);
         Ok(())
@@ -553,6 +567,101 @@ mod tests {
         let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
         let result = world.apply_impulse("ghost", [0.0, 100.0, 0.0]);
         assert!(result.is_err());
+    }
+
+    /// TDD spec: dynamic body at origin, linear velocity [0,10,0], step → Y > 0.
+    #[test]
+    fn test_set_linear_velocity_upward_moves_dynamic_body() {
+        let mut world = PhysicsWorld::new([0.0, 0.0, 0.0]); // no gravity
+        world
+            .add_body(BodyConfig {
+                entity_id: "robot".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Ball { radius: 0.5 },
+                position: [0.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        world
+            .set_velocity("robot", [0.0, 10.0, 0.0], [0.0, 0.0, 0.0])
+            .expect("set_velocity on a dynamic body should succeed");
+
+        world.step(FIXED_DT);
+
+        let pos = world.get_position("robot").unwrap();
+        assert!(
+            pos[1] > 0.0,
+            "Y position should be > 0.0 after upward velocity, got {}",
+            pos[1]
+        );
+    }
+
+    #[test]
+    fn test_set_velocity_on_static_body_returns_error() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "wall".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 1.0,
+                    hy: 1.0,
+                    hz: 1.0,
+                },
+                position: [0.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        let result = world.set_velocity("wall", [0.0, 10.0, 0.0], [0.0, 0.0, 0.0]);
+        assert!(
+            result.is_err(),
+            "set_velocity on a Static body should return Err without crashing"
+        );
+
+        // The world must not crash on the next step.
+        world.step(FIXED_DT);
+
+        // The static body must not have moved.
+        let pos = world.get_position("wall").unwrap();
+        assert!(
+            pos[1].abs() < 1e-5,
+            "Static body should not move; Y = {}",
+            pos[1]
+        );
+    }
+
+    #[test]
+    fn test_apply_impulse_on_static_body_returns_error() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "pillar".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 0.5,
+                    hz: 0.5,
+                },
+                position: [0.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        let result = world.apply_impulse("pillar", [0.0, 100.0, 0.0]);
+        assert!(
+            result.is_err(),
+            "apply_impulse on a Static body should return Err without crashing"
+        );
+
+        // The world must not crash on the next step.
+        world.step(FIXED_DT);
+
+        // The static body must not have moved.
+        let pos = world.get_position("pillar").unwrap();
+        assert!(
+            pos[1].abs() < 1e-5,
+            "Static body should not move; Y = {}",
+            pos[1]
+        );
     }
 
     // ---- Step 5: State Snapshot Generation ----
