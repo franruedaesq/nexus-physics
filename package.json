@@ -6,7 +6,8 @@
     "test": "cargo test",
     "test:wasm": "wasm-pack test bindings/wasm --headless --firefox",
     "build:wasm:web": "wasm-pack build bindings/wasm --target web --out-dir ../../pkg",
-    "build:wasm:nodejs": "wasm-pack build bindings/wasm --target nodejs --out-dir ../../pkg-node"
+    "build:wasm:nodejs": "wasm-pack build bindings/wasm --target nodejs --out-dir ../../pkg-node",
+    "build:npm": "node scripts/build-npm.mjs"
   },
   "keywords": ["physics", "wasm", "rapier3d", "3d"],
   "license": "MIT"
