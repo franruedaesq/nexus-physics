@@ -1,6 +1,6 @@
 {
   "name": "@nexus-physics/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A headless, domain-agnostic, server-authoritative 3D physics engine (isomorphic Wasm)",
   "keywords": [
     "physics",
@@ -16,6 +16,7 @@
   },
   "exports": {
     ".": {
+      "types": "./dist/web/nexus_physics_wasm.d.ts",
       "browser": "./dist/web/nexus_physics_wasm.js",
       "node": "./dist/node/nexus_physics_wasm.js",
       "import": "./dist/web/nexus_physics_wasm.js",

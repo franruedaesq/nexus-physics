@@ -1,14 +1,21 @@
 {
   "name": "@nexus-physics/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A headless, domain-agnostic, server-authoritative 3D physics engine",
   "scripts": {
     "test": "cargo test",
     "test:wasm": "wasm-pack test bindings/wasm --headless --firefox",
     "build:wasm:web": "wasm-pack build bindings/wasm --target web --out-dir ../../pkg",
     "build:wasm:nodejs": "wasm-pack build bindings/wasm --target nodejs --out-dir ../../pkg-node",
-    "build:npm": "node scripts/build-npm.mjs"
+    "build:npm": "node scripts/build-npm.mjs",
+    "publish:test": "./scripts/publish-npm.sh test",
+    "publish:npm": "./scripts/publish-npm.sh publish"
   },
-  "keywords": ["physics", "wasm", "rapier3d", "3d"],
+  "keywords": [
+    "physics",
+    "wasm",
+    "rapier3d",
+    "3d"
+  ],
   "license": "MIT"
 }

@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-physics-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rapier3d",
  "serde",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-physics-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "js-sys",
  "nexus-physics-core",
