@@ -1,0 +1,34 @@
+{
+  "name": "@nexus-physics/core",
+  "version": "0.1.0",
+  "description": "A headless, domain-agnostic, server-authoritative 3D physics engine (isomorphic Wasm)",
+  "keywords": [
+    "physics",
+    "wasm",
+    "rapier3d",
+    "3d",
+    "isomorphic"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/franruedaesq/nexus-physics.git"
+  },
+  "exports": {
+    ".": {
+      "browser": "./dist/web/nexus_physics_wasm.js",
+      "node": "./dist/node/nexus_physics_wasm.js",
+      "import": "./dist/web/nexus_physics_wasm.js",
+      "require": "./dist/node/nexus_physics_wasm.js",
+      "default": "./dist/web/nexus_physics_wasm.js"
+    }
+  },
+  "main": "./dist/node/nexus_physics_wasm.js",
+  "module": "./dist/web/nexus_physics_wasm.js",
+  "browser": "./dist/web/nexus_physics_wasm.js",
+  "types": "./dist/web/nexus_physics_wasm.d.ts",
+  "files": [
+    "dist/"
+  ],
+  "sideEffects": false
+}

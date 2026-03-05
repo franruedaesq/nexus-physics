@@ -1,4 +1,6 @@
 /target
 /pkg
 /pkg-node
+/npm/dist
 node_modules
+dist
