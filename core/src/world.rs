@@ -108,8 +108,10 @@ pub struct PhysicsWorld {
 impl PhysicsWorld {
     /// Create a new physics world with the given gravity vector `[gx, gy, gz]`.
     pub fn new(gravity: [f32; 3]) -> Self {
-        let mut integration_params = IntegrationParameters::default();
-        integration_params.dt = FIXED_DT;
+        let integration_params = IntegrationParameters {
+            dt: FIXED_DT,
+            ..Default::default()
+        };
 
         Self {
             gravity: vector![gravity[0], gravity[1], gravity[2]],
@@ -217,6 +219,26 @@ impl PhysicsWorld {
         Ok(())
     }
 
+    /// Remove a body (and its collider) from the world by `entity_id`.
+    ///
+    /// Returns an error if the entity is not found.
+    pub fn remove_body(&mut self, entity_id: &str) -> Result<(), String> {
+        let handle = self
+            .entity_map
+            .remove(entity_id)
+            .ok_or_else(|| format!("Entity '{}' not found", entity_id))?;
+
+        self.rigid_body_set.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            true,
+        );
+        Ok(())
+    }
+
     /// Return the total number of rigid bodies registered in the world.
     pub fn body_count(&self) -> usize {
         self.rigid_body_set.len()
@@ -298,6 +320,23 @@ impl PhysicsWorld {
         Ok([t.x, t.y, t.z])
     }
 
+    /// Get the current rotation of a body as a quaternion `[qx, qy, qz, qw]`.
+    pub fn get_rotation(&self, entity_id: &str) -> Result<[f32; 4], String> {
+        let handle = self
+            .entity_map
+            .get(entity_id)
+            .copied()
+            .ok_or_else(|| format!("Entity '{}' not found", entity_id))?;
+
+        let body = self
+            .rigid_body_set
+            .get(handle)
+            .ok_or_else(|| format!("Rapier handle for '{}' is invalid", entity_id))?;
+
+        let r = body.rotation();
+        Ok([r.i, r.j, r.k, r.w])
+    }
+
     /// Build a snapshot of all moving (Dynamic and Kinematic) bodies ordered by entity_id.
     ///
     /// Static bodies are excluded: they never change position so there is no
@@ -374,27 +413,28 @@ impl PhysicsWorld {
     /// Each element is the TOI of the first hit, or `max_toi` if no collider
     /// was struck.
     ///
-    /// # Panics
-    /// Panics if `origins.len() != directions.len()`.
+    /// Returns an error if `origins.len() != directions.len()`.
     pub fn cast_ray_batch(
         &self,
         origins: &[[f32; 3]],
         directions: &[[f32; 3]],
         max_toi: f32,
-    ) -> Vec<f32> {
-        assert_eq!(
-            origins.len(),
-            directions.len(),
-            "origins and directions must have the same length"
-        );
-        origins
+    ) -> Result<Vec<f32>, String> {
+        if origins.len() != directions.len() {
+            return Err(format!(
+                "origins and directions must have the same length (got {} and {})",
+                origins.len(),
+                directions.len()
+            ));
+        }
+        Ok(origins
             .iter()
             .zip(directions.iter())
             .map(|(origin, direction)| {
                 self.cast_ray(*origin, *direction, max_toi)
                     .unwrap_or(max_toi)
             })
-            .collect()
+            .collect())
     }
 
     /// Explicitly rebuild the internal `QueryPipeline` from the current world
@@ -1034,7 +1074,7 @@ mod tests {
         let origins = vec![[0.0_f32, 0.0, 0.0], [0.0_f32, 0.0, 0.0]];
         let directions = vec![[1.0_f32, 0.0, 0.0], [-1.0_f32, 0.0, 0.0]];
 
-        let results = world.cast_ray_batch(&origins, &directions, max_toi);
+        let results = world.cast_ray_batch(&origins, &directions, max_toi).expect("cast_ray_batch should succeed");
 
         assert_eq!(results.len(), 2);
         // First ray (+X) should hit.
@@ -1055,7 +1095,71 @@ mod tests {
     #[test]
     fn test_cast_ray_batch_empty_input() {
         let world = PhysicsWorld::new([0.0, 0.0, 0.0]);
-        let results = world.cast_ray_batch(&[], &[], 100.0);
+        let results = world.cast_ray_batch(&[], &[], 100.0).expect("empty batch should succeed");
         assert!(results.is_empty());
+    }
+
+    /// `cast_ray_batch` returns an error when `origins` and `directions` lengths differ.
+    #[test]
+    fn test_cast_ray_batch_mismatched_lengths_returns_error() {
+        let world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        let origins = vec![[0.0_f32, 0.0, 0.0], [1.0_f32, 0.0, 0.0]];
+        let directions = vec![[1.0_f32, 0.0, 0.0]];
+        let result = world.cast_ray_batch(&origins, &directions, 100.0);
+        assert!(result.is_err(), "mismatched lengths should return Err");
+    }
+
+    /// `remove_body` removes a body from the world.
+    #[test]
+    fn test_remove_body_reduces_count() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "ball".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Ball { radius: 0.5 },
+                position: [0.0, 0.0, 0.0],
+            })
+            .unwrap();
+        assert_eq!(world.entity_count(), 1);
+        world.remove_body("ball").expect("remove_body should succeed");
+        assert_eq!(world.entity_count(), 0);
+        assert_eq!(world.body_count(), 0);
+    }
+
+    /// `remove_body` returns an error for an unknown entity.
+    #[test]
+    fn test_remove_body_invalid_entity_returns_error() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        let result = world.remove_body("ghost");
+        assert!(result.is_err());
+    }
+
+    /// `get_rotation` returns the identity quaternion for a body at rest.
+    #[test]
+    fn test_get_rotation_identity_at_rest() {
+        let mut world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "box".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Cuboid { hx: 0.5, hy: 0.5, hz: 0.5 },
+                position: [0.0, 0.0, 0.0],
+            })
+            .unwrap();
+        let rot = world.get_rotation("box").expect("get_rotation should succeed");
+        // Identity quaternion: [qx, qy, qz, qw] = [0, 0, 0, 1].
+        assert!((rot[0]).abs() < 1e-5, "qx must be ~0");
+        assert!((rot[1]).abs() < 1e-5, "qy must be ~0");
+        assert!((rot[2]).abs() < 1e-5, "qz must be ~0");
+        assert!((rot[3] - 1.0).abs() < 1e-5, "qw must be ~1");
+    }
+
+    /// `get_rotation` returns an error for an unknown entity.
+    #[test]
+    fn test_get_rotation_invalid_entity_returns_error() {
+        let world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        let result = world.get_rotation("nonexistent");
+        assert!(result.is_err());
     }
 }
