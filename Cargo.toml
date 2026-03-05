@@ -1,0 +1,3 @@
+[workspace]
+members = ["core", "bindings/wasm"]
+resolver = "2"
