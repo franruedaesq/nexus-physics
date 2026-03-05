@@ -4,6 +4,7 @@
   "description": "A headless, domain-agnostic, server-authoritative 3D physics engine",
   "scripts": {
     "test": "cargo test",
+    "test:wasm": "wasm-pack test bindings/wasm --headless --firefox",
     "build:wasm:web": "wasm-pack build bindings/wasm --target web --out-dir ../../pkg",
     "build:wasm:nodejs": "wasm-pack build bindings/wasm --target nodejs --out-dir ../../pkg-node"
   },
