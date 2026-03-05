@@ -42,43 +42,70 @@ Implement the foundational Physics World wrapper.
 3. Write a test to advance the simulation by one step (`world.step()`) and ensure it executes without panicking.
 4. Implement the `step()` method using Rapier's pipeline.
 
-### Step 3: Entity Registration API (TDD)
+### Step 3: Entity Registration (RigidBodies & Colliders)
 
-Allow users to add shapes to the world.
+**Objective:** Establish the API for populating the physics world with abstract geometric shapes and physical properties, completely decoupled from any domain-specific concepts (like "wheels" or "chassis").
 
-1. Write a test that adds a static floor (Cuboid) and a dynamic sphere to the `PhysicsWorld` and asserts that the internal body count is 2.
-2. Implement an `add_body` method. It should accept an agnostic configuration struct (e.g., `RigidBodyConfig` containing shape type, dimensions, position, and dynamic/static status).
-3. Return a unique entity ID (e.g., a simple `u32` or Rapier's `RigidBodyHandle` wrapped in a custom type) to the caller.
+* **Architecture & DX:** * We must map user-friendly IDs (e.g., `u32` or `String`) to Rapier's internal `RigidBodyHandle` and `ColliderHandle`. The frontend user should never touch a complex internal memory handle.
+* Expose a builder pattern or configuration object (`RigidBodyConfig`) that accepts body types (`Dynamic`, `Static`, `KinematicPositionBased`) and collider shapes (`Cuboid`, `Sphere`, `Cylinder`).
 
-### Step 4: Input Injection & Forces (TDD)
 
-Implement the ability to move objects programmatically.
+* **TDD Implementation:**
+* *Test:* Instantiate the `PhysicsWorld`. Call `add_body(Static, Cuboid)` to act as a floor, and `add_body(Dynamic, Sphere)` suspended in the air.
+* *Assertion:* Verify that the engine's internal handle map contains exactly 2 entities and that attempting to retrieve an entity with an invalid ID returns a handled `Error` or `None`, rather than panicking.
 
-1. Write a test that creates a dynamic body, applies a linear velocity of `[0.0, 10.0, 0.0]`, steps the world once, and asserts the body's Y position has increased.
-2. Implement `set_velocity(entity_id, linear, angular)` and `apply_impulse(entity_id, impulse)` methods.
-3. Ensure error handling exists if an invalid `entity_id` is provided.
 
-### Step 5: State Snapshot Generation (TDD)
+### Step 4: Input Injection & Forces
 
-Extract the world state into a transport-ready format.
+**Objective:** Provide the interface for manipulating the simulation from the outside world (e.g., applying movement commands from a network payload, ROS 2 `/cmd_vel`, or UI inputs).
 
-1. Write a test that adds bodies, steps the physics, and calls `world.get_snapshot()`. Assert that the snapshot contains the exact new coordinates and quaternions of the dynamic bodies.
-2. Implement a `Snapshot` struct that maps entity IDs to their current `[x, y, z]` and `[qx, qy, qz, qw]`.
-3. Implement a method to serialize this snapshot into a flat binary array (`Vec<u8>`) or lightweight JSON format using `serde`.
+* **Architecture & DX:**
+* The API must allow applying continuous forces (Linear/Angular Velocity) for motorized movement, and instant forces (Impulses) for sudden impacts or jumps.
+* All methods must target the user-friendly IDs created in Phase 3.
 
-### Step 6: WebAssembly Bridge Implementation (TDD)
 
-Expose the Rust API to TypeScript.
+* **TDD Implementation:**
+* *Test:* Create a dynamic body at origin `[0, 0, 0]`. Apply a linear velocity of `[0.0, 10.0, 0.0]` (moving up the Y-axis). Call `world.step()`.
+* *Assertion:* Read the body's position and assert that `Y > 0.0`. Test invalid inputs (applying forces to a `Static` body) to ensure the engine gracefully ignores them or logs a warning without crashing.
 
-1. In `bindings/wasm/src/lib.rs`, write a `#[wasm_bindgen]` struct called `WasmPhysicsWorld` that internally holds the `core::PhysicsWorld`.
-2. Expose Wasm-compatible methods: `new()`, `add_body()`, `step()`, `set_velocity()`, and `get_snapshot_buffer()`.
-3. Write Wasm headless tests (using `wasm-bindgen-test`) to instantiate the world, step it, and read the buffer entirely in a simulated JS environment.
+### Step 5: Spatial Queries (The "LiDAR" Engine)
 
-### Step 7: NPM Packaging & Three.js Example
+**Objective:** Expose a headless raycasting pipeline to simulate distance sensors, line-of-sight checks, and object detection without requiring a rendering engine.
 
-Configure the final build pipeline and prove interoperability.
+* **Architecture & DX:**
+* Wrap Rapier's `QueryPipeline`.
+* Implement two methods: `cast_ray(origin, direction, max_toi)` for single queries, and a highly optimized `cast_ray_batch(origins, directions, max_toi)` specifically designed to handle dense sensor arrays (like a 360-degree LiDAR) in a single CPU tick.
+* Return an array of distances (Time of Impact - TOI). If a ray hits nothing, return a designated maximum distance value.
 
-1. Configure `wasm-pack build --target web` in the `package.json` to output to a `pkg` directory.
-2. Create an `examples/threejs-client` directory.
-3. Initialize a basic Vite + TypeScript + Three.js project.
-4. Import the local Wasm package. Map the snapshot's positional and quaternion data directly to a `THREE.Mesh().position` and `THREE.Mesh().quaternion` in the render loop to prove seamless integration.
+
+* **TDD Implementation:**
+* *Test:* Place a static `Cuboid` wall at `X = 5.0`. Fire a ray from `X = 0.0` pointing directly along the positive X-axis (`[1.0, 0.0, 0.0]`).
+* *Assertion:* Assert that the engine returns a hit at exactly distance `5.0`. Fire a second ray in the opposite direction (`[-1.0, 0.0, 0.0]`) and assert it returns `None` or the max range.
+
+### Step 6: State Snapshot Generation
+
+**Objective:** Extract the exact positional and rotational data of all moving entities in the world into a transport-agnostic format, optimized for network broadcasting.
+
+* **Architecture & DX:**
+* **Crucial Rule:** Avoid nested JSON objects for the tick loop. The engine must compile the data into a flat, contiguous array to prevent garbage collection spikes in JS.
+* Structure the data conceptually as: `[ID, PosX, PosY, PosZ, RotX, RotY, RotZ, RotW]`.
+* Only extract data for `Dynamic` and `Kinematic` bodies; `Static` bodies do not need to be broadcasted every frame.
+
+
+* **TDD Implementation:**
+* *Test:* Add one static floor and two dynamic falling cubes. Step the simulation. Call `world.get_snapshot()`.
+* *Assertion:* Verify the output is a flat vector/array of floats. Assert the length of the array is exactly `2 * 8` (2 bodies, 8 floats per body: 1 ID, 3 Pos, 4 Quat).
+
+### Step 7: WebAssembly Bridge & Memory Views
+
+**Objective:** Safely export the Rust architecture to JavaScript/TypeScript environments (Browser and Node.js) with zero-copy memory access for maximum performance.
+
+* **Architecture & DX:**
+* Use `wasm-bindgen` to wrap the `PhysicsWorld`.
+* Expose the Phase 6 snapshot and Phase 5 raycast results not by copying data into JavaScript arrays, but by returning a `js_sys::Float32Array::view` pointing directly to WebAssembly's linear memory.
+* Auto-generate TypeScript `.d.ts` definitions so frontend developers get strict autocomplete for the methods.
+
+* **TDD Implementation:**
+* *Test:* Write a `#[wasm_bindgen_test]` that runs in a headless browser environment. Instantiate the Wasm class, add a body, step the physics, and call the memory view function.
+* *Assertion:* Read the values directly from the JS `Float32Array` memory buffer and assert they perfectly match the expected physics calculations.
+
