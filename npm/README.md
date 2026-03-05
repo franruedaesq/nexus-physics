@@ -14,24 +14,14 @@ import init, { WasmPhysicsWorld } from '@nexus-physics/core';
 // Initialize the Wasm module
 await init();
 
-// Create world with gravity
-const world = new WasmPhysicsWorld([0, -9.81, 0]);
+// Create world with gravity (3 separate args: gx, gy, gz)
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 
-// Add static floor
-world.add_body({
-  entity_id: 'floor',
-  body_type: 'Static',
-  shape: { type: 'Cuboid', hx: 10, hy: 0.5, hz: 10 },
-  position: [0, -1, 0],
-});
+// Add static floor (7 args: entity_id, body_type, shape_type, dims, px, py, pz)
+world.add_body('floor', 'static', 'cuboid', [10, 0.5, 10], 0, -1, 0);
 
 // Add dynamic ball
-world.add_body({
-  entity_id: 'ball',
-  body_type: 'Dynamic',
-  shape: { type: 'Ball', radius: 0.5 },
-  position: [0, 5, 0],
-});
+world.add_body('ball', 'dynamic', 'ball', [0.5], 0, 5, 0);
 
 // Step the simulation
 world.step(1 / 60);
@@ -54,22 +44,19 @@ console.log(`Ball position: (${buffer[1]}, ${buffer[2]}, ${buffer[3]})`);
 
 ### Body Types
 
-```typescript
-type BodyType = 'Dynamic' | 'Static' | 'KinematicPositionBased';
-```
+Pass as lowercase strings to `add_body()`:
 
-- **Dynamic**: Affected by forces and gravity. For moving objects.
-- **Static**: Immovable terrain, walls, platforms.
-- **KinematicPositionBased**: Programmatically positioned via `set_position()`. For elevators, moving platforms.
+- **`"dynamic"`**: Affected by forces and gravity. For moving objects.
+- **`"static"`**: Immovable terrain, walls, platforms.
+- **`"kinematic"`**: Moved programmatically. For elevators, moving platforms.
 
 ### Shape Types
 
-```typescript
-type Shape =
-  | { type: 'Cuboid'; hx: number; hy: number; hz: number }
-  | { type: 'Ball'; radius: number }
-  | { type: 'Cylinder'; radius: number; half_height: number };
-```
+Pass as lowercase strings with dimension arrays:
+
+- **`"cuboid"`**: Box shape. Dims: `[hx, hy, hz]` (half-extents)
+- **`"ball"`**: Sphere shape. Dims: `[radius]`
+- **`"cylinder"`**: Cylinder shape. Dims: `[radius, half_height]`
 
 ### Snapshot Buffer Layout
 
@@ -100,12 +87,12 @@ for (let i = 0; i < buffer.length; i += 8) {
 ### Multiplayer Game with Client Prediction
 
 ```typescript
-const world = new WasmPhysicsWorld([0, -9.81, 0]);
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 
 // Game loop
 function gameLoop(deltaTime) {
-  // Apply local player input
-  world.set_linear_velocity('player', inputVelocity);
+  // Apply local player input (linear + angular velocity combined)
+  world.set_velocity('player', vx, vy, vz, ax, ay, az);
 
   // Predict locally
   world.step(deltaTime);
@@ -117,8 +104,9 @@ function gameLoop(deltaTime) {
   // Periodically reconciliate with server
   if (shouldReconciliate()) {
     const serverSnapshot = await fetchServerSnapshot();
-    world.set_position('other_player', serverSnapshot.position);
-    world.set_rotation('other_player', serverSnapshot.rotation);
+    const pos = serverSnapshot.position;
+    const rot = serverSnapshot.rotation;
+    world.apply_impulse('other_player', pos[0], pos[1], pos[2]);
   }
 }
 ```
@@ -129,7 +117,7 @@ function gameLoop(deltaTime) {
 import * as THREE from 'three';
 import init, { WasmPhysicsWorld } from '@nexus-physics/core';
 
-const world = new WasmPhysicsWorld([0, -9.81, 0]);
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 const meshes = new Map<string, THREE.Mesh>();
 
 function render() {
@@ -162,20 +150,14 @@ function render() {
 ```typescript
 import { WasmPhysicsWorld } from '@nexus-physics/core';
 
-const world = new WasmPhysicsWorld([0, -9.81, 0]);
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 
 // Add robot base and wheels
-world.add_body({
-  entity_id: 'robot_base',
-  body_type: 'Dynamic',
-  shape: { type: 'Cuboid', hx: 0.3, hy: 0.1, hz: 0.3 },
-  position: [0, 0.5, 0],
-});
+world.add_body('robot_base', 'dynamic', 'cuboid', [0.3, 0.1, 0.3], 0, 0.5, 0);
 
-// Control via velocity commands
-function applyMotorCommand(linear_velocity, angular_velocity) {
-  world.set_linear_velocity('robot_base', linear_velocity);
-  world.set_angular_velocity('robot_base', angular_velocity);
+// Control via velocity commands (linear + angular)
+function applyMotorCommand(lx, ly, lz, ax, ay, az) {
+  world.set_velocity('robot_base', lx, ly, lz, ax, ay, az);
 }
 
 // Simulate sensor reading (e.g., LiDAR)
@@ -190,32 +172,35 @@ function readSensors() {
 ### Deterministic Replay
 
 ```typescript
-const world = new WasmPhysicsWorld([0, -9.81, 0]);
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 const timeline: Array<{
-  position: [number, number, number];
-  velocity: [number, number, number];
+  velocities: Float32Array;
 }> = [];
 
 // Record phase
-function recordFrame() {
+function recordFrame(
+  lx: number,
+  ly: number,
+  lz: number,
+  ax: number,
+  ay: number,
+  az: number,
+) {
+  world.set_velocity('player', lx, ly, lz, ax, ay, az);
   world.step(1 / 60);
   timeline.push({
-    position: world.get_position('player'),
-    velocity: world.get_linear_velocity('player'),
+    velocities: new Float32Array([lx, ly, lz, ax, ay, az]),
   });
 }
 
 // Replay phase
 function replay() {
-  const newWorld = new WasmPhysicsWorld([0, -9.81, 0]);
-  // Recreate bodies
-  newWorld.add_body({
-    /* ... */
-  });
+  const newWorld = new WasmPhysicsWorld(0, -9.81, 0);
+  newWorld.add_body('player', 'dynamic', 'ball', [0.5], 0, 5, 0);
 
   for (const frame of timeline) {
-    newWorld.set_position('player', frame.position);
-    newWorld.set_linear_velocity('player', frame.velocity);
+    const v = frame.velocities;
+    newWorld.set_velocity('player', v[0], v[1], v[2], v[3], v[4], v[5]);
     newWorld.step(1 / 60);
   }
 }
@@ -227,62 +212,60 @@ function replay() {
 
 ```typescript
 class WasmPhysicsWorld {
-  constructor(gravity: [number, number, number]);
+  // Constructor takes 3 separate gravity components (not an array)
+  constructor(gx: number, gy: number, gz: number);
 
   step(deltaTime: number): void;
-  gravity(): [number, number, number];
+  body_count(): number;
+  update_query_pipeline(): void;
 
-  add_body(config: {
-    entity_id: string;
-    body_type: 'Dynamic' | 'Static' | 'KinematicPositionBased';
-    shape: Shape;
-    position: [number, number, number];
-  }): void;
+  // Add body with 7 arguments (not a config object)
+  add_body(
+    entity_id: string,
+    body_type: 'dynamic' | 'static' | 'kinematic', // lowercase!
+    shape_type: 'cuboid' | 'ball' | 'cylinder', // lowercase!
+    dims: number[], // [hx,hy,hz] or [radius] or [radius,half_height]
+    px: number,
+    py: number,
+    pz: number,
+  ): void;
 
   remove_body(entity_id: string): void;
-  body_exists(entity_id: string): boolean;
 
+  // Only snapshot method - returns Float32Array view
   get_snapshot_view(): Float32Array;
-  get_snapshot_json(): {
-    entries: Array<{
-      entity_id: string;
-      position: [number, number, number];
-      rotation: [number, number, number, number];
-    }>;
-  };
 
-  set_linear_velocity(
+  // Set both linear AND angular velocity in one call
+  set_velocity(
     entity_id: string,
-    velocity: [number, number, number],
-  ): void;
-  set_angular_velocity(
-    entity_id: string,
-    velocity: [number, number, number],
-  ): void;
-  apply_impulse(entity_id: string, impulse: [number, number, number]): void;
-
-  set_position(entity_id: string, position: [number, number, number]): void;
-  set_rotation(
-    entity_id: string,
-    rotation: [number, number, number, number],
+    lx: number,
+    ly: number,
+    lz: number, // linear velocity
+    ax: number,
+    ay: number,
+    az: number, // angular velocity
   ): void;
 
-  get_position(entity_id: string): [number, number, number];
-  get_rotation(entity_id: string): [number, number, number, number];
-  get_linear_velocity(entity_id: string): [number, number, number];
-  get_angular_velocity(entity_id: string): [number, number, number];
+  apply_impulse(entity_id: string, ix: number, iy: number, iz: number): void;
+
+  get_position(entity_id: string): Float32Array; // length 3
+  get_rotation(entity_id: string): Float32Array; // length 4 (quaternion)
 
   cast_ray(
-    origin: [number, number, number],
-    direction: [number, number, number],
+    ox: number,
+    oy: number,
+    oz: number, // origin
+    dx: number,
+    dy: number,
+    dz: number, // direction
     max_toi: number,
-  ): number; // Distance to hit, or max_toi if no hit
+  ): number; // Distance to hit, or NaN if no hit
 
   cast_ray_batch(
     origins: Float32Array, // [x, y, z, x, y, z, ...]
     directions: Float32Array, // [x, y, z, x, y, z, ...]
     max_toi: number,
-  ): Float32Array; // [distance, distance, ...]
+  ): Float32Array; // [distance, distance, ...] - max_toi on miss
 }
 ```
 

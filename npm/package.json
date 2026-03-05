@@ -1,7 +1,7 @@
 {
   "name": "@nexus-physics/core",
-  "version": "0.2.0",
-  "description": "A headless, domain-agnostic, server-authoritative 3D physics engine (isomorphic Wasm)",
+  "version": "0.2.1",
+  "description": "A headless, domain-agnostic, server-authoritative 3D physics engine (isomorphic Wasm",
   "keywords": [
     "physics",
     "wasm",

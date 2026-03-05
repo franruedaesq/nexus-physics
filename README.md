@@ -67,26 +67,16 @@ nexus-physics-core = { path = "./nexus-physics/core" }
 import init, { WasmPhysicsWorld } from '@nexus-physics/core';
 
 // Initialize the Wasm module
-const physics = await init();
+await init();
 
-// Create a physics world with gravity
-const world = new WasmPhysicsWorld([0.0, -9.81, 0.0]);
+// Create a physics world with gravity (3 separate args: gx, gy, gz)
+const world = new WasmPhysicsWorld(0, -9.81, 0);
 
-// Add a static floor
-world.add_body({
-  entity_id: 'floor',
-  body_type: 'Static',
-  shape: { type: 'Cuboid', hx: 10, hy: 0.5, hz: 10 },
-  position: [0, -1, 0],
-});
+// Add a static floor (7 args: entity_id, body_type, shape_type, dims, px, py, pz)
+world.add_body('floor', 'static', 'cuboid', [10, 0.5, 10], 0, -1, 0);
 
 // Add a dynamic sphere
-world.add_body({
-  entity_id: 'ball',
-  body_type: 'Dynamic',
-  shape: { type: 'Ball', radius: 0.5 },
-  position: [0, 5, 0],
-});
+world.add_body('ball', 'dynamic', 'ball', [0.5], 0, 5, 0);
 
 // Step the simulation
 const deltaTime = 1 / 60; // 60 Hz
@@ -141,46 +131,72 @@ fn main() {
 
 ### Body Types
 
-- **`Dynamic`**: Affected by forces, gravity, and collisions. Used for moving objects.
-- **`Static`**: Immovable. Used for terrain, walls, platforms.
-- **`KinematicPositionBased`**: Moved programmatically via position targets. Used for elevators, moving platforms, or scripted motion.
+**For Wasm/JavaScript API** - use lowercase strings:
+
+- **`"dynamic"`**: Affected by forces, gravity, and collisions. Used for moving objects.
+- **`"static"`**: Immovable. Used for terrain, walls, platforms.
+- **`"kinematic"`**: Moved programmatically. Used for elevators, moving platforms.
+
+**For Rust API** - use the enum:
+
+- **`BodyType::Dynamic`**
+- **`BodyType::Static`**
+- **`BodyType::KinematicPositionBased`**
 
 ### Shapes
 
-- **`Cuboid`**: Axis-aligned box defined by half-extents `[hx, hy, hz]`
-- **`Ball`**: Sphere defined by radius
-- **`Cylinder`**: Cylindrical shape defined by radius and half-height
+**For Wasm/JavaScript API** - pass lowercase strings with dimension arrays:
+
+- **`"cuboid"`**: Box. Dims: `[hx, hy, hz]` (half-extents)
+- **`"ball"`**: Sphere. Dims: `[radius]`
+- **`"cylinder"`**: Cylinder. Dims: `[radius, half_height]`
+
+**For Rust API** - use the enum:
+
+- **`ShapeConfig::Cuboid { hx, hy, hz }`**
+- **`ShapeConfig::Ball { radius }`**
+- **`ShapeConfig::Cylinder { radius, half_height }`**
 
 ### Forces & Motion
 
-```typescript
-// Apply linear velocity directly
-world.set_linear_velocity('player_1', [1.0, 0.0, 0.0]);
+**Wasm/JavaScript API:**
 
-// Apply rotational velocity
-world.set_angular_velocity('player_1', [0.0, 2.0, 0.0]);
+```typescript
+// Set both linear and angular velocity in one call
+world.set_velocity('player_1', lx, ly, lz, ax, ay, az);
 
 // Apply an impulse (instant force)
-world.apply_impulse('player_1', [0.0, 10.0, 0.0]);
+world.apply_impulse('player_1', ix, iy, iz);
+```
 
-// Set position (kinematic bodies, or teleport)
-world.set_position('player_1', [0.0, 5.0, 0.0]);
+**Rust API:**
 
-// Set rotation (as quaternion)
-world.set_rotation('player_1', [0.0, 0.0, 0.7071, 0.7071]);
+```rust
+// Set linear and angular velocity
+world.set_velocity("player_1", [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]);
+
+// Apply impulse
+world.apply_impulse("player_1", [0.0, 10.0, 0.0]);
 ```
 
 ### Snapshots
 
-The engine periodically generates snapshots without exposing Rapier's internals:
+**Wasm/JavaScript API:**
 
 ```typescript
 // Get snapshot as flat Float32Array (zero-copy)
 const buffer = world.get_snapshot_view();
+// Layout: [index, x, y, z, qx, qy, qz, qw, ...]
+```
 
-// Or get as structured JSON
-const snapshot = world.get_snapshot_json();
-// Returns: { entries: [{ entity_id: "ball", position: [...], rotation: [...] }, ...] }
+**Rust API:**
+
+```rust
+// Get structured snapshot
+let snapshot = world.get_snapshot();
+println!("{}", snapshot.to_json());
+// Or get flat buffer
+let buffer = snapshot.to_buffer();
 ```
 
 ## Use Cases
@@ -202,8 +218,7 @@ Simulate robot kinematics and dynamics before deploying to real hardware.
 
 ```rust
 // Rust server controlling a simulated robot
-world.set_linear_velocity("robot_base", cmd_vel);
-world.set_angular_velocity("robot_base", cmd_omega);
+world.set_velocity("robot_base", [vx, vy, vz], [ax, ay, az]);
 let sensor_snapshot = world.get_snapshot();  // "LiDAR" data
 ```
 
@@ -251,40 +266,38 @@ for (const frame of frames) {
 
 ## API Reference
 
-### World Management
+### Wasm/JavaScript API
 
-| Method                          | Description                                                       |
-| ------------------------------- | ----------------------------------------------------------------- |
-| `new WasmPhysicsWorld(gravity)` | Create a new physics world                                        |
-| `world.step(deltaTime)`         | Advance simulation by delta time (uses fixed timestep internally) |
-| `world.gravity()`               | Get current gravity vector                                        |
-| `world.get_snapshot()`          | Get structured snapshot (JSON-serializable)                       |
-| `world.get_snapshot_view()`     | Get zero-copy `Float32Array` view                                 |
+| Method                                                               | Description                                           |
+| -------------------------------------------------------------------- | ----------------------------------------------------- |
+| `new WasmPhysicsWorld(gx, gy, gz)`                                   | Create a physics world with gravity components        |
+| `world.step(deltaTime)`                                              | Advance simulation (fixed timestep internally)        |
+| `world.body_count()`                                                 | Get number of bodies in the world                     |
+| `world.get_snapshot_view()`                                          | Get zero-copy `Float32Array` view of world state      |
+| `world.add_body(entity_id, body_type, shape_type, dims, px, py, pz)` | Add a rigid body (7 args)                             |
+| `world.remove_body(entity_id)`                                       | Remove a body                                         |
+| `world.set_velocity(entity_id, lx, ly, lz, ax, ay, az)`              | Set linear + angular velocity                         |
+| `world.apply_impulse(entity_id, ix, iy, iz)`                         | Apply instant force                                   |
+| `world.get_position(entity_id)`                                      | Get position as `Float32Array` (length 3)             |
+| `world.get_rotation(entity_id)`                                      | Get rotation as `Float32Array` (length 4, quaternion) |
+| `world.cast_ray(ox, oy, oz, dx, dy, dz, max_toi)`                    | Single raycast, returns distance or NaN               |
+| `world.cast_ray_batch(origins, directions, max_toi)`                 | Batch raycast, returns `Float32Array`                 |
 
-### Body Management
+### Rust API
 
-| Method                         | Description                   |
-| ------------------------------ | ----------------------------- |
-| `world.add_body(config)`       | Add a rigid body to the world |
-| `world.remove_body(entity_id)` | Remove a body                 |
-| `world.body_exists(entity_id)` | Check if body exists          |
-
-### Forces & Motion
-
-| Method                                       | Description                     |
-| -------------------------------------------- | ------------------------------- |
-| `world.set_linear_velocity(entity_id, vel)`  | Set body velocity               |
-| `world.set_angular_velocity(entity_id, rot)` | Set rotational velocity         |
-| `world.apply_impulse(entity_id, impulse)`    | Apply instant force             |
-| `world.set_position(entity_id, pos)`         | Teleport or move kinematic body |
-| `world.set_rotation(entity_id, quat)`        | Set rotation via quaternion     |
-
-### Spatial Queries
-
-| Method                                               | Description                           |
-| ---------------------------------------------------- | ------------------------------------- |
-| `world.cast_ray(origin, direction, maxDist)`         | Single raycast                        |
-| `world.cast_ray_batch(origins, directions, maxDist)` | Multi-raycast (optimized for sensors) |
+| Method                                               | Description                                |
+| ---------------------------------------------------- | ------------------------------------------ |
+| `PhysicsWorld::new(gravity)`                         | Create world with gravity array `[f32; 3]` |
+| `world.step(delta_time)`                             | Advance simulation                         |
+| `world.add_body(config)`                             | Add body with `BodyConfig` struct          |
+| `world.remove_body(entity_id)`                       | Remove body by string ID                   |
+| `world.get_snapshot()`                               | Get `Snapshot` struct                      |
+| `world.set_velocity(entity_id, lin_vel, ang_vel)`    | Set velocities with arrays                 |
+| `world.apply_impulse(entity_id, impulse)`            | Apply impulse array                        |
+| `world.get_position(entity_id)`                      | Get position array                         |
+| `world.get_rotation(entity_id)`                      | Get quaternion array                       |
+| `world.cast_ray(origin, direction, max_toi)`         | Single raycast                             |
+| `world.cast_ray_batch(origins, directions, max_toi)` | Batch raycast                              |
 
 ## Building & Development
 
