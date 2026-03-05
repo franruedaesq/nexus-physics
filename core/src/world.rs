@@ -56,19 +56,17 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Serialize the snapshot into a flat `Float32` buffer:
-    /// `[id_len (as u32 bits), id_bytes..., x, y, z, qx, qy, qz, qw, ...]`
+    /// Serialize the snapshot into a flat `Float32` buffer.
     ///
-    /// For zero-copy Wasm interop the positions and rotations are packed as
-    /// a contiguous `Vec<f32>` where every body occupies exactly 8 floats:
-    /// `[x, y, z, qx, qy, qz, qw, <index_as_f32>]`.
+    /// Each body occupies exactly **8 floats** in the order:
+    /// `[ID, PosX, PosY, PosZ, RotX, RotY, RotZ, RotW]`
     ///
-    /// The returned buffer is `num_bodies * 8` f32 values long.  The caller
-    /// must track which index corresponds to which `entity_id` via
-    /// `Snapshot::entries` (ordered consistently).
+    /// `ID` is the zero-based index of the body within this snapshot's sorted
+    /// entry list.  The returned buffer length is `num_bodies * 8`.
     pub fn to_buffer(&self) -> Vec<f32> {
         let mut buf = Vec::with_capacity(self.entries.len() * 8);
         for (idx, entry) in self.entries.iter().enumerate() {
+            buf.push(idx as f32);
             buf.push(entry.position[0]);
             buf.push(entry.position[1]);
             buf.push(entry.position[2]);
@@ -76,7 +74,6 @@ impl Snapshot {
             buf.push(entry.rotation[1]);
             buf.push(entry.rotation[2]);
             buf.push(entry.rotation[3]);
-            buf.push(idx as f32);
         }
         buf
     }
@@ -301,20 +298,27 @@ impl PhysicsWorld {
         Ok([t.x, t.y, t.z])
     }
 
-    /// Build a snapshot of all registered bodies ordered by entity_id.
+    /// Build a snapshot of all moving (Dynamic and Kinematic) bodies ordered by entity_id.
+    ///
+    /// Static bodies are excluded: they never change position so there is no
+    /// need to broadcast them on every tick.
     pub fn get_snapshot(&self) -> Snapshot {
         let mut entries: Vec<SnapshotEntry> = self
             .entity_map
             .iter()
             .filter_map(|(id, handle)| {
-                self.rigid_body_set.get(*handle).map(|body| {
+                self.rigid_body_set.get(*handle).and_then(|body| {
+                    // Skip fixed (static) bodies — they never move.
+                    if body.is_fixed() {
+                        return None;
+                    }
                     let t = body.translation();
                     let r = body.rotation();
-                    SnapshotEntry {
+                    Some(SnapshotEntry {
                         entity_id: id.clone(),
                         position: [t.x, t.y, t.z],
                         rotation: [r.i, r.j, r.k, r.w],
-                    }
+                    })
                 })
             })
             .collect();
@@ -775,7 +779,8 @@ mod tests {
             .unwrap();
 
         let snapshot = world.get_snapshot();
-        assert_eq!(snapshot.entries.len(), 2);
+        // Static body "b" is excluded; only the dynamic body "a" is returned.
+        assert_eq!(snapshot.entries.len(), 1);
     }
 
     #[test]
@@ -871,6 +876,74 @@ mod tests {
         assert!(json.contains("obj"));
         assert!(json.contains("position"));
         assert!(json.contains("rotation"));
+    }
+
+    // ---- Step 6: State Snapshot Generation (flat buffer, dynamic/kinematic only) ----
+
+    /// TDD spec: 1 static floor + 2 dynamic cubes; step once; flat buffer must
+    /// be exactly 2 × 8 = 16 floats (static floor excluded).
+    #[test]
+    fn test_snapshot_step6_flat_buffer_excludes_static() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+
+        // Static floor — must NOT appear in the snapshot.
+        world
+            .add_body(BodyConfig {
+                entity_id: "floor".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 50.0,
+                    hy: 0.1,
+                    hz: 50.0,
+                },
+                position: [0.0, -0.1, 0.0],
+            })
+            .expect("Adding floor should succeed");
+
+        // Two dynamic falling cubes.
+        world
+            .add_body(BodyConfig {
+                entity_id: "cube_a".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 0.5,
+                    hz: 0.5,
+                },
+                position: [0.0, 10.0, 0.0],
+            })
+            .expect("Adding cube_a should succeed");
+
+        world
+            .add_body(BodyConfig {
+                entity_id: "cube_b".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 0.5,
+                    hz: 0.5,
+                },
+                position: [2.0, 10.0, 0.0],
+            })
+            .expect("Adding cube_b should succeed");
+
+        world.step(FIXED_DT);
+
+        let snapshot = world.get_snapshot();
+        // Only the 2 dynamic cubes should be present — static floor excluded.
+        assert_eq!(
+            snapshot.entries.len(),
+            2,
+            "Snapshot should contain exactly 2 dynamic bodies, not the static floor"
+        );
+
+        let buf = snapshot.to_buffer();
+        // 2 bodies × 8 floats (ID, PosX, PosY, PosZ, RotX, RotY, RotZ, RotW) = 16.
+        assert_eq!(
+            buf.len(),
+            2 * 8,
+            "Flat buffer should be exactly 16 floats for 2 dynamic bodies"
+        );
     }
 
     // ---- Step 5 (LiDAR): Spatial Queries ----
