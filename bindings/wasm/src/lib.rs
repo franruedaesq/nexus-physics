@@ -1,3 +1,5 @@
+#![deny(clippy::all)]
+
 use js_sys::Float32Array;
 use nexus_physics_core::{BodyConfig, BodyType, PhysicsWorld, ShapeConfig};
 use wasm_bindgen::prelude::*;
@@ -33,17 +35,27 @@ impl WasmPhysicsWorld {
     ///
     /// `delta_time` is the elapsed wall-clock time in seconds since the last
     /// call.  Internally an accumulator ensures only fixed-timestep ticks run.
-    pub fn step(&mut self, delta_time: f32) {
+    ///
+    /// Returns a `JsError` if `delta_time` is not a finite positive value.
+    pub fn step(&mut self, delta_time: f32) -> Result<(), JsError> {
+        if !delta_time.is_finite() || delta_time < 0.0 {
+            return Err(JsError::new(
+                "delta_time must be a finite non-negative number",
+            ));
+        }
         self.inner.step(delta_time);
+        Ok(())
     }
 
     /// Add a body to the world.
     ///
-    /// `shape_type` must be one of `"cuboid"` or `"ball"`.
-    /// `dims` for a cuboid is `[hx, hy, hz]`; for a ball it is `[radius]`.
-    /// `body_type_str` must be `"dynamic"` or `"static"`.
+    /// `body_type_str` must be one of `"dynamic"`, `"static"`, or `"kinematic"`.
+    /// `shape_type` must be one of `"cuboid"`, `"ball"`, or `"cylinder"`.
+    /// `dims` for a cuboid is `[hx, hy, hz]`; for a ball it is `[radius]`;
+    /// for a cylinder it is `[radius, half_height]`.
     ///
-    /// Returns `true` on success, throws a `JsError` on failure.
+    /// Returns `Ok(())` on success, throws a `JsError` on failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_body(
         &mut self,
         entity_id: &str,
@@ -54,9 +66,21 @@ impl WasmPhysicsWorld {
         py: f32,
         pz: f32,
     ) -> Result<(), JsError> {
+        if entity_id.is_empty() {
+            return Err(JsError::new("entity_id must not be empty"));
+        }
+        for (name, v) in [("px", px), ("py", py), ("pz", pz)] {
+            if !v.is_finite() {
+                return Err(JsError::new(&format!(
+                    "Position component '{name}' must be finite, got {v}"
+                )));
+            }
+        }
+
         let body_type = match body_type_str {
             "dynamic" => BodyType::Dynamic,
             "static" => BodyType::Static,
+            "kinematic" => BodyType::KinematicPositionBased,
             other => return Err(JsError::new(&format!("Unknown body type: '{other}'"))),
         };
 
@@ -77,6 +101,17 @@ impl WasmPhysicsWorld {
                 }
                 ShapeConfig::Ball { radius: dims[0] }
             }
+            "cylinder" => {
+                if dims.len() < 2 {
+                    return Err(JsError::new(
+                        "Cylinder requires 2 dimensions: [radius, half_height]",
+                    ));
+                }
+                ShapeConfig::Cylinder {
+                    radius: dims[0],
+                    half_height: dims[1],
+                }
+            }
             other => return Err(JsError::new(&format!("Unknown shape type: '{other}'"))),
         };
 
@@ -90,7 +125,17 @@ impl WasmPhysicsWorld {
             .map_err(|e| JsError::new(&e))
     }
 
+    /// Remove a body (and its collider) from the world by `entity_id`.
+    ///
+    /// Returns a `JsError` if the entity is not found.
+    pub fn remove_body(&mut self, entity_id: &str) -> Result<(), JsError> {
+        self.inner
+            .remove_body(entity_id)
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// Set the linear and angular velocity of a body.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_velocity(
         &mut self,
         entity_id: &str,
@@ -101,6 +146,20 @@ impl WasmPhysicsWorld {
         ay: f32,
         az: f32,
     ) -> Result<(), JsError> {
+        for (name, v) in [
+            ("lx", lx),
+            ("ly", ly),
+            ("lz", lz),
+            ("ax", ax),
+            ("ay", ay),
+            ("az", az),
+        ] {
+            if !v.is_finite() {
+                return Err(JsError::new(&format!(
+                    "Velocity component '{name}' must be finite, got {v}"
+                )));
+            }
+        }
         self.inner
             .set_velocity(entity_id, [lx, ly, lz], [ax, ay, az])
             .map_err(|e| JsError::new(&e))
@@ -114,9 +173,45 @@ impl WasmPhysicsWorld {
         iy: f32,
         iz: f32,
     ) -> Result<(), JsError> {
+        for (name, v) in [("ix", ix), ("iy", iy), ("iz", iz)] {
+            if !v.is_finite() {
+                return Err(JsError::new(&format!(
+                    "Impulse component '{name}' must be finite, got {v}"
+                )));
+            }
+        }
         self.inner
             .apply_impulse(entity_id, [ix, iy, iz])
             .map_err(|e| JsError::new(&e))
+    }
+
+    /// Get the current position of a body as `[x, y, z]` packed into a
+    /// `Float32Array` of length 3.
+    pub fn get_position(&self, entity_id: &str) -> Result<Float32Array, JsError> {
+        let pos = self
+            .inner
+            .get_position(entity_id)
+            .map_err(|e| JsError::new(&e))?;
+        let arr = Float32Array::new_with_length(3);
+        arr.set_index(0, pos[0]);
+        arr.set_index(1, pos[1]);
+        arr.set_index(2, pos[2]);
+        Ok(arr)
+    }
+
+    /// Get the current rotation of a body as `[qx, qy, qz, qw]` packed into a
+    /// `Float32Array` of length 4.
+    pub fn get_rotation(&self, entity_id: &str) -> Result<Float32Array, JsError> {
+        let rot = self
+            .inner
+            .get_rotation(entity_id)
+            .map_err(|e| JsError::new(&e))?;
+        let arr = Float32Array::new_with_length(4);
+        arr.set_index(0, rot[0]);
+        arr.set_index(1, rot[1]);
+        arr.set_index(2, rot[2]);
+        arr.set_index(3, rot[3]);
+        Ok(arr)
     }
 
     /// Return a zero-copy `Float32Array` view into the snapshot buffer in Wasm
@@ -162,6 +257,7 @@ impl WasmPhysicsWorld {
     /// * `ox, oy, oz` — ray origin.
     /// * `dx, dy, dz` — ray direction (need not be normalised).
     /// * `max_toi` — maximum distance / time-of-impact.
+    #[allow(clippy::too_many_arguments)]
     pub fn cast_ray(
         &self,
         ox: f32,
@@ -203,7 +299,7 @@ impl WasmPhysicsWorld {
                 "cast_ray_batch: origins and directions must have the same length",
             ));
         }
-        if origins.len() % 3 != 0 {
+        if !origins.len().is_multiple_of(3) {
             return Err(JsError::new(
                 "cast_ray_batch: origins length must be a multiple of 3",
             ));
@@ -223,7 +319,10 @@ impl WasmPhysicsWorld {
             })
             .collect();
 
-        self.raycast_buf = self.inner.cast_ray_batch(&orig_chunks, &dir_chunks, max_toi);
+        self.raycast_buf = self
+            .inner
+            .cast_ray_batch(&orig_chunks, &dir_chunks, max_toi)
+            .map_err(|e| JsError::new(&e))?;
         // SAFETY: `self.raycast_buf` is owned by this struct and lives in Wasm
         // linear memory.  No reallocation of this Vec occurs between this
         // point and when JavaScript reads the returned view, provided the
