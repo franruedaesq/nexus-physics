@@ -9,11 +9,13 @@ pub type EntityId = String;
 /// Fixed simulation timestep: 60 Hz.
 const FIXED_DT: f32 = 1.0 / 60.0;
 
-/// The type of a rigid body — either dynamic (affected by forces) or static (immovable).
+/// The type of a rigid body — either dynamic (affected by forces), static (immovable),
+/// or kinematic position-based (moved programmatically via position targets).
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodyType {
     Dynamic,
     Static,
+    KinematicPositionBased,
 }
 
 /// Describes the shape of a collider to be added to the world.
@@ -23,6 +25,8 @@ pub enum ShapeConfig {
     Cuboid { hx: f32, hy: f32, hz: f32 },
     /// A sphere defined by its radius.
     Ball { radius: f32 },
+    /// A cylinder defined by its radius and half-height along the Y axis.
+    Cylinder { radius: f32, half_height: f32 },
 }
 
 /// Configuration used to add a body to the physics world.
@@ -185,6 +189,13 @@ impl PhysicsWorld {
                     config.position[2]
                 ])
                 .build(),
+            BodyType::KinematicPositionBased => RigidBodyBuilder::kinematic_position_based()
+                .translation(vector![
+                    config.position[0],
+                    config.position[1],
+                    config.position[2]
+                ])
+                .build(),
         };
 
         let handle = self.rigid_body_set.insert(rigid_body);
@@ -192,6 +203,9 @@ impl PhysicsWorld {
         let collider = match config.shape {
             ShapeConfig::Cuboid { hx, hy, hz } => ColliderBuilder::cuboid(hx, hy, hz).build(),
             ShapeConfig::Ball { radius } => ColliderBuilder::ball(radius).build(),
+            ShapeConfig::Cylinder { radius, half_height } => {
+                ColliderBuilder::cylinder(half_height, radius).build()
+            }
         };
 
         self.collider_set
@@ -204,6 +218,11 @@ impl PhysicsWorld {
     /// Return the total number of rigid bodies registered in the world.
     pub fn body_count(&self) -> usize {
         self.rigid_body_set.len()
+    }
+
+    /// Return the number of entries in the internal entity handle map.
+    pub fn entity_count(&self) -> usize {
+        self.entity_map.len()
     }
 
     /// Set the linear and angular velocity of a body identified by `entity_id`.
@@ -388,6 +407,84 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entity_count_matches_handle_map() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+
+        world
+            .add_body(BodyConfig {
+                entity_id: "floor".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 50.0,
+                    hy: 0.1,
+                    hz: 50.0,
+                },
+                position: [0.0, -0.1, 0.0],
+            })
+            .expect("Adding floor should succeed");
+
+        world
+            .add_body(BodyConfig {
+                entity_id: "ball".to_string(),
+                body_type: BodyType::Dynamic,
+                shape: ShapeConfig::Ball { radius: 0.5 },
+                position: [0.0, 5.0, 0.0],
+            })
+            .expect("Adding ball should succeed");
+
+        assert_eq!(world.entity_count(), 2, "handle map should contain exactly 2 entries");
+        assert_eq!(world.body_count(), 2);
+    }
+
+    #[test]
+    fn test_get_position_invalid_entity_returns_error() {
+        let world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+        let result = world.get_position("nonexistent");
+        assert!(result.is_err(), "get_position with invalid ID should return Err, not panic");
+    }
+
+    #[test]
+    fn test_add_kinematic_position_based_body() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+
+        world
+            .add_body(BodyConfig {
+                entity_id: "platform".to_string(),
+                body_type: BodyType::KinematicPositionBased,
+                shape: ShapeConfig::Cuboid {
+                    hx: 2.0,
+                    hy: 0.2,
+                    hz: 2.0,
+                },
+                position: [0.0, 2.0, 0.0],
+            })
+            .expect("Adding kinematic body should succeed");
+
+        assert_eq!(world.entity_count(), 1);
+        let pos = world.get_position("platform").unwrap();
+        assert!((pos[1] - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_add_cylinder_shape() {
+        let mut world = PhysicsWorld::new([0.0, -9.81, 0.0]);
+
+        world
+            .add_body(BodyConfig {
+                entity_id: "pillar".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cylinder {
+                    radius: 0.5,
+                    half_height: 2.0,
+                },
+                position: [0.0, 0.0, 0.0],
+            })
+            .expect("Adding cylinder-shaped body should succeed");
+
+        assert_eq!(world.entity_count(), 1);
     }
 
     // ---- Step 4: Input Injection & Forces ----
