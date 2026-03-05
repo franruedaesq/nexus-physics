@@ -101,6 +101,7 @@ pub struct PhysicsWorld {
     impulse_joint_set: ImpulseJointSet,
     multibody_joint_set: MultibodyJointSet,
     ccd_solver: CCDSolver,
+    query_pipeline: QueryPipeline,
     /// Maps user-supplied string IDs to internal Rapier handles.
     entity_map: HashMap<EntityId, RigidBodyHandle>,
     /// Leftover time from the previous `step()` call for the accumulator.
@@ -125,6 +126,7 @@ impl PhysicsWorld {
             impulse_joint_set: ImpulseJointSet::new(),
             multibody_joint_set: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
+            query_pipeline: QueryPipeline::new(),
             entity_map: HashMap::new(),
             time_accumulator: 0.0,
         }
@@ -161,6 +163,9 @@ impl PhysicsWorld {
             );
             self.time_accumulator -= FIXED_DT;
         }
+
+        self.query_pipeline
+            .update(&self.collider_set);
     }
 
     /// Add a body to the world using the provided configuration.
@@ -318,6 +323,85 @@ impl PhysicsWorld {
         entries.sort_by(|a, b| a.entity_id.cmp(&b.entity_id));
 
         Snapshot { entries }
+    }
+
+    /// Cast a single ray from `origin` along `direction` up to `max_toi` units.
+    ///
+    /// Returns `Some(toi)` if the ray hits a collider, where `toi` is the
+    /// distance along the ray to the first hit.  Returns `None` if no collider
+    /// is struck within `max_toi`.
+    ///
+    /// The query pipeline is updated lazily; callers should ensure `step()` has
+    /// been called (or call this after adding bodies) so the pipeline reflects
+    /// current world state.  If the pipeline is stale, call
+    /// `update_query_pipeline()` first.
+    pub fn cast_ray(
+        &self,
+        origin: [f32; 3],
+        direction: [f32; 3],
+        max_toi: f32,
+    ) -> Option<f32> {
+        let ray = Ray::new(
+            point![origin[0], origin[1], origin[2]],
+            vector![direction[0], direction[1], direction[2]],
+        );
+        self.query_pipeline
+            .cast_ray(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_toi,
+                true,
+                QueryFilter::default(),
+            )
+            .map(|(_handle, toi)| toi)
+    }
+
+    /// Cast multiple rays in a single call, one per `(origins[i], directions[i])` pair.
+    ///
+    /// This is designed for dense sensor arrays such as a 360-degree LiDAR where
+    /// hundreds of rays must be evaluated within a single CPU tick.
+    ///
+    /// * `origins` — flat `[x0, y0, z0, x1, y1, z1, …]` buffer.
+    /// * `directions` — flat `[dx0, dy0, dz0, dx1, dy1, dz1, …]` buffer.
+    /// * `max_toi` — maximum time-of-impact for every ray.
+    ///
+    /// Returns a `Vec<f32>` of length `n` (where `n = origins.len() / 3`).
+    /// Each element is the TOI of the first hit, or `max_toi` if no collider
+    /// was struck.
+    ///
+    /// # Panics
+    /// Panics if `origins.len() != directions.len()`.
+    pub fn cast_ray_batch(
+        &self,
+        origins: &[[f32; 3]],
+        directions: &[[f32; 3]],
+        max_toi: f32,
+    ) -> Vec<f32> {
+        assert_eq!(
+            origins.len(),
+            directions.len(),
+            "origins and directions must have the same length"
+        );
+        origins
+            .iter()
+            .zip(directions.iter())
+            .map(|(origin, direction)| {
+                self.cast_ray(*origin, *direction, max_toi)
+                    .unwrap_or(max_toi)
+            })
+            .collect()
+    }
+
+    /// Explicitly rebuild the internal `QueryPipeline` from the current world
+    /// state.
+    ///
+    /// This is called automatically at the end of every `step()`, but you can
+    /// call it manually after adding bodies without stepping (e.g., for static
+    /// scenes that are never simulated).
+    pub fn update_query_pipeline(&mut self) {
+        self.query_pipeline
+            .update(&self.collider_set);
     }
 }
 
@@ -787,5 +871,118 @@ mod tests {
         assert!(json.contains("obj"));
         assert!(json.contains("position"));
         assert!(json.contains("rotation"));
+    }
+
+    // ---- Step 5 (LiDAR): Spatial Queries ----
+
+    /// TDD spec: static cuboid wall centered at X = 5.0 with hx = 0.5; ray from
+    /// origin along +X hits the near face at X = 4.5.
+    #[test]
+    fn test_cast_ray_hits_wall_at_correct_distance() {
+        let mut world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        // Wall centered at X = 5.0 with half-extent hx = 0.5, so the near face
+        // is at X = 4.5.  A ray from the origin along +X should report a TOI
+        // of 4.5.
+        world
+            .add_body(BodyConfig {
+                entity_id: "wall".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 5.0,
+                    hz: 5.0,
+                },
+                position: [5.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        // Sync query pipeline without stepping (static scene).
+        world.update_query_pipeline();
+
+        let max_toi = 100.0_f32;
+        let toi = world.cast_ray([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], max_toi);
+
+        assert!(toi.is_some(), "Ray along +X should hit the wall");
+        let distance = toi.unwrap();
+        assert!(
+            (distance - 4.5).abs() < 0.01,
+            "Expected hit near X = 4.5 (near face of wall centered at 5.0 with hx=0.5), got {distance}"
+        );
+    }
+
+    /// TDD spec: ray fired in the opposite direction (−X) should miss the wall and
+    /// return `None`.
+    #[test]
+    fn test_cast_ray_misses_in_opposite_direction() {
+        let mut world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "wall".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 5.0,
+                    hz: 5.0,
+                },
+                position: [5.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        world.update_query_pipeline();
+
+        // Ray pointing in the −X direction from the origin — should miss the wall.
+        let toi = world.cast_ray([0.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 100.0);
+        assert!(
+            toi.is_none(),
+            "Ray along −X should miss the wall at X=5; got {toi:?}"
+        );
+    }
+
+    /// `cast_ray_batch` returns `max_toi` for a miss and a finite TOI for a hit.
+    #[test]
+    fn test_cast_ray_batch_mixed_hits_and_misses() {
+        let mut world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        world
+            .add_body(BodyConfig {
+                entity_id: "wall".to_string(),
+                body_type: BodyType::Static,
+                shape: ShapeConfig::Cuboid {
+                    hx: 0.5,
+                    hy: 5.0,
+                    hz: 5.0,
+                },
+                position: [5.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        world.update_query_pipeline();
+
+        let max_toi = 100.0_f32;
+        let origins = vec![[0.0_f32, 0.0, 0.0], [0.0_f32, 0.0, 0.0]];
+        let directions = vec![[1.0_f32, 0.0, 0.0], [-1.0_f32, 0.0, 0.0]];
+
+        let results = world.cast_ray_batch(&origins, &directions, max_toi);
+
+        assert_eq!(results.len(), 2);
+        // First ray (+X) should hit.
+        assert!(
+            results[0] < max_toi,
+            "First ray (+X) should hit; got {}",
+            results[0]
+        );
+        // Second ray (−X) should miss → returns max_toi.
+        assert!(
+            (results[1] - max_toi).abs() < 1e-4,
+            "Second ray (−X) should miss and return max_toi; got {}",
+            results[1]
+        );
+    }
+
+    /// `cast_ray_batch` with an empty input returns an empty `Vec`.
+    #[test]
+    fn test_cast_ray_batch_empty_input() {
+        let world = PhysicsWorld::new([0.0, 0.0, 0.0]);
+        let results = world.cast_ray_batch(&[], &[], 100.0);
+        assert!(results.is_empty());
     }
 }

@@ -126,4 +126,77 @@ impl WasmPhysicsWorld {
     pub fn body_count(&self) -> usize {
         self.inner.body_count()
     }
+
+    /// Rebuild the internal query pipeline from the current world state.
+    ///
+    /// This is called automatically at the end of every `step()`. Call this
+    /// manually after adding bodies to a static scene that is never stepped.
+    pub fn update_query_pipeline(&mut self) {
+        self.inner.update_query_pipeline();
+    }
+
+    /// Cast a single ray and return the time-of-impact (distance) to the first
+    /// hit, or `NaN` if no collider was struck within `max_toi`.
+    ///
+    /// * `ox, oy, oz` — ray origin.
+    /// * `dx, dy, dz` — ray direction (need not be normalised).
+    /// * `max_toi` — maximum distance / time-of-impact.
+    pub fn cast_ray(
+        &self,
+        ox: f32,
+        oy: f32,
+        oz: f32,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+        max_toi: f32,
+    ) -> f32 {
+        self.inner
+            .cast_ray([ox, oy, oz], [dx, dy, dz], max_toi)
+            .unwrap_or(f32::NAN)
+    }
+
+    /// Cast multiple rays in a single call and return the results as a
+    /// `Float32Array`.
+    ///
+    /// * `origins` — flat `Float32Array` with layout `[x0, y0, z0, x1, y1, z1, …]`.
+    /// * `directions` — flat `Float32Array` with layout `[dx0, dy0, dz0, …]`.
+    /// * `max_toi` — maximum distance / time-of-impact for every ray.
+    ///
+    /// Returns a `Float32Array` of length `n` (one TOI per ray). A miss is
+    /// represented as `max_toi`.
+    pub fn cast_ray_batch(
+        &self,
+        origins: &[f32],
+        directions: &[f32],
+        max_toi: f32,
+    ) -> Result<Float32Array, JsError> {
+        if origins.len() != directions.len() {
+            return Err(JsError::new(
+                "cast_ray_batch: origins and directions must have the same length",
+            ));
+        }
+        if origins.len() % 3 != 0 {
+            return Err(JsError::new(
+                "cast_ray_batch: origins length must be a multiple of 3",
+            ));
+        }
+
+        let n = origins.len() / 3;
+        let orig_chunks: Vec<[f32; 3]> = (0..n)
+            .map(|i| [origins[i * 3], origins[i * 3 + 1], origins[i * 3 + 2]])
+            .collect();
+        let dir_chunks: Vec<[f32; 3]> = (0..n)
+            .map(|i| {
+                [
+                    directions[i * 3],
+                    directions[i * 3 + 1],
+                    directions[i * 3 + 2],
+                ]
+            })
+            .collect();
+
+        let results = self.inner.cast_ray_batch(&orig_chunks, &dir_chunks, max_toi);
+        Ok(Float32Array::from(results.as_slice()))
+    }
 }
