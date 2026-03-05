@@ -9,6 +9,12 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct WasmPhysicsWorld {
     inner: PhysicsWorld,
+    /// Backing buffer for zero-copy snapshot views.  Owned by this struct so
+    /// it lives in Wasm linear memory and its address stays stable for the
+    /// lifetime of a single call.
+    snapshot_buf: Vec<f32>,
+    /// Backing buffer for zero-copy raycast-batch views.
+    raycast_buf: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -18,6 +24,8 @@ impl WasmPhysicsWorld {
     pub fn new(gx: f32, gy: f32, gz: f32) -> WasmPhysicsWorld {
         WasmPhysicsWorld {
             inner: PhysicsWorld::new([gx, gy, gz]),
+            snapshot_buf: Vec::new(),
+            raycast_buf: Vec::new(),
         }
     }
 
@@ -111,15 +119,28 @@ impl WasmPhysicsWorld {
             .map_err(|e| JsError::new(&e))
     }
 
-    /// Return a `Float32Array` containing the current snapshot buffer.
+    /// Return a zero-copy `Float32Array` view into the snapshot buffer in Wasm
+    /// linear memory.
     ///
-    /// Layout: `[x, y, z, qx, qy, qz, qw, index]` per body, 8 floats each.
-    /// The data is copied into JavaScript-owned memory, making it safe to hold
-    /// across Wasm heap allocations.
-    pub fn get_snapshot_buffer(&self) -> Float32Array {
+    /// Layout per body: `[index, x, y, z, qx, qy, qz, qw]` — 8 floats.
+    /// Total length is `num_dynamic_bodies * 8`.
+    ///
+    /// # Safety
+    /// The returned view points directly into WebAssembly linear memory.
+    /// Do **not** trigger any Wasm heap allocation (e.g., call other Wasm
+    /// methods that allocate) while holding the returned `Float32Array` in
+    /// JavaScript, as a reallocation of the backing `Vec` would invalidate the
+    /// pointer.  Acquire all the values you need from the view before calling
+    /// any other method on this object.
+    pub fn get_snapshot_view(&mut self) -> Float32Array {
         let snapshot = self.inner.get_snapshot();
-        let buf = snapshot.to_buffer();
-        Float32Array::from(buf.as_slice())
+        self.snapshot_buf = snapshot.to_buffer();
+        // SAFETY: `self.snapshot_buf` is owned by this struct and lives in
+        // Wasm linear memory.  No reallocation of this Vec occurs between this
+        // point and when JavaScript reads the returned view, provided the
+        // caller does not invoke any other allocating Wasm method while the
+        // view is live.
+        unsafe { Float32Array::view(&self.snapshot_buf) }
     }
 
     /// Return the number of bodies in the world.
@@ -157,7 +178,7 @@ impl WasmPhysicsWorld {
     }
 
     /// Cast multiple rays in a single call and return the results as a
-    /// `Float32Array`.
+    /// zero-copy `Float32Array` view into Wasm linear memory.
     ///
     /// * `origins` — flat `Float32Array` with layout `[x0, y0, z0, x1, y1, z1, …]`.
     /// * `directions` — flat `Float32Array` with layout `[dx0, dy0, dz0, …]`.
@@ -165,8 +186,14 @@ impl WasmPhysicsWorld {
     ///
     /// Returns a `Float32Array` of length `n` (one TOI per ray). A miss is
     /// represented as `max_toi`.
+    ///
+    /// # Safety
+    /// The returned view points directly into WebAssembly linear memory.
+    /// Do **not** trigger any Wasm heap allocation while holding the returned
+    /// `Float32Array` in JavaScript.  Acquire all values before calling any
+    /// other allocating method on this object.
     pub fn cast_ray_batch(
-        &self,
+        &mut self,
         origins: &[f32],
         directions: &[f32],
         max_toi: f32,
@@ -196,7 +223,12 @@ impl WasmPhysicsWorld {
             })
             .collect();
 
-        let results = self.inner.cast_ray_batch(&orig_chunks, &dir_chunks, max_toi);
-        Ok(Float32Array::from(results.as_slice()))
+        self.raycast_buf = self.inner.cast_ray_batch(&orig_chunks, &dir_chunks, max_toi);
+        // SAFETY: `self.raycast_buf` is owned by this struct and lives in Wasm
+        // linear memory.  No reallocation of this Vec occurs between this
+        // point and when JavaScript reads the returned view, provided the
+        // caller does not invoke any other allocating Wasm method while the
+        // view is live.
+        Ok(unsafe { Float32Array::view(&self.raycast_buf) })
     }
 }
